@@ -41,15 +41,16 @@
 #include <geometry_msgs/TransformStamped.h>
 #include <sensor_msgs/PointCloud2.h>
 
-#include <pcl/filters/filter.h>
-#include <pcl/filters/statistical_outlier_removal.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/features/normal_3d.h>
 #include <pcl/registration/gicp.h>
 
 namespace gu = geometry_utils;
 namespace gr = gu::ros;
 namespace pu = parameter_utils;
+
+using pcl::copyPointCloud;
+using pcl::GeneralizedIterativeClosestPoint;
+using pcl::PointCloud;
+using pcl::PointXYZ;
 
 PointCloudOdometry::PointCloudOdometry() : initialized_(false) {
   query_.reset(new PointCloud);
@@ -100,6 +101,10 @@ bool PointCloudOdometry::LoadParameters(const ros::NodeHandle& n) {
   if (!pu::Get("icp/corr_dist", params_.icp_corr_dist)) return false;
   if (!pu::Get("icp/iterations", params_.icp_iterations)) return false;
 
+  if (!pu::Get("icp/transform_thresholding", transform_thresholding_)) return false;
+  if (!pu::Get("icp/max_translation", max_translation_)) return false;
+  if (!pu::Get("icp/max_rotation", max_rotation_)) return false;
+
   return true;
 }
 
@@ -123,16 +128,16 @@ bool PointCloudOdometry::UpdateEstimate(const PointCloud& points) {
 
   // If this is the first point cloud, store it and wait for another.
   if (!initialized_) {
-    pcl::copyPointCloud(points, *query_);
+    copyPointCloud(points, *query_);
     initialized_ = true;
     return false;
   }
 
   // Move current query points (acquired last iteration) to reference points.
-  pcl::copyPointCloud(*query_, *reference_);
+  copyPointCloud(*query_, *reference_);
 
   // Set the incoming point cloud as the query point cloud.
-  pcl::copyPointCloud(points, *query_);
+  copyPointCloud(points, *query_);
 
   // Update pose estimate via ICP.
   return UpdateICP();
@@ -157,9 +162,8 @@ bool PointCloudOdometry::GetLastPointCloud(PointCloud::Ptr& out) const {
 }
 
 bool PointCloudOdometry::UpdateICP() {
-  // ICP-based alignment. Generalized ICP does (roughly) plane-to-plane
-  // matching, and is much more robust than standard ICP.
-  pcl::GeneralizedIterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+  // Compute the incremental transformation.
+  GeneralizedIterativeClosestPoint<PointXYZ, PointXYZ> icp;
   icp.setRANSACOutlierRejectionThreshold(params_.icp_ransac_thresh);
   icp.setTransformationEpsilon(params_.icp_tf_epsilon);
   icp.setMaxCorrespondenceDistance(params_.icp_corr_dist);
@@ -178,8 +182,19 @@ bool PointCloudOdometry::UpdateICP() {
   incremental_estimate_.rotation = gu::Rot3(T(0, 0), T(0, 1), T(0, 2),
                                             T(1, 0), T(1, 1), T(1, 2),
                                             T(2, 0), T(2, 1), T(2, 2));
-  integrated_estimate_ =
-      gu::PoseUpdate(integrated_estimate_, incremental_estimate_);
+
+  // Only update if the incremental transform is small enough.
+  if (!transform_thresholding_ ||
+      (incremental_estimate_.translation.Norm() <= max_translation_ &&
+       incremental_estimate_.rotation.ToEulerZYX().Norm() <= max_rotation_)) {
+    integrated_estimate_ =
+        gu::PoseUpdate(integrated_estimate_, incremental_estimate_);
+  } else {
+    ROS_WARN(
+        "%s: Discarding incremental transformation with norm (t: %lf, r: %lf)",
+        name_.c_str(), incremental_estimate_.translation.Norm(),
+        incremental_estimate_.rotation.ToEulerZYX().Norm());
+  }
 
   // Convert pose estimates to ROS format and publish.
   PublishPose(incremental_estimate_, incremental_estimate_pub_);
