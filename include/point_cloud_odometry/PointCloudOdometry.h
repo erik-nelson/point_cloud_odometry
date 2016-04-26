@@ -112,10 +112,6 @@ class PointCloudOdometry {
 
   // Parameters for filtering, and ICP.
   struct Parameters {
-    // Do a prerejective RANSAC step during ICP. Reject correspondences greater
-    // than this distance.
-    double icp_ransac_thresh;
-
     // Stop ICP if the transformation from the last iteration was this small.
     double icp_tf_epsilon;
 

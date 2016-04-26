@@ -96,7 +96,6 @@ bool PointCloudOdometry::LoadParameters(const ros::NodeHandle& n) {
   integrated_estimate_ = init;
 
   // Load algorithm parameters.
-  if (!pu::Get("icp/ransac_thresh", params_.icp_ransac_thresh)) return false;
   if (!pu::Get("icp/tf_epsilon", params_.icp_tf_epsilon)) return false;
   if (!pu::Get("icp/corr_dist", params_.icp_corr_dist)) return false;
   if (!pu::Get("icp/iterations", params_.icp_iterations)) return false;
@@ -112,8 +111,9 @@ bool PointCloudOdometry::RegisterCallbacks(const ros::NodeHandle& n) {
   // Create a local nodehandle to manage callback subscriptions.
   ros::NodeHandle nl(n);
 
-  query_pub_ = nl.advertise<PointCloud>("query_points", 10, false);
-  reference_pub_ = nl.advertise<PointCloud>("reference_points", 10, false);
+  query_pub_ = nl.advertise<PointCloud>("odometry_query_points", 10, false);
+  reference_pub_ =
+      nl.advertise<PointCloud>("odometry_reference_points", 10, false);
   incremental_estimate_pub_ = nl.advertise<geometry_msgs::PoseStamped>(
       "odometry_incremental_estimate", 10, false);
   integrated_estimate_pub_ = nl.advertise<geometry_msgs::PoseStamped>(
@@ -164,10 +164,10 @@ bool PointCloudOdometry::GetLastPointCloud(PointCloud::Ptr& out) const {
 bool PointCloudOdometry::UpdateICP() {
   // Compute the incremental transformation.
   GeneralizedIterativeClosestPoint<PointXYZ, PointXYZ> icp;
-  icp.setRANSACOutlierRejectionThreshold(params_.icp_ransac_thresh);
   icp.setTransformationEpsilon(params_.icp_tf_epsilon);
   icp.setMaxCorrespondenceDistance(params_.icp_corr_dist);
   icp.setMaximumIterations(params_.icp_iterations);
+  icp.setRANSACIterations(0);
 
   icp.setInputSource(query_);
   icp.setInputTarget(reference_);
@@ -219,7 +219,10 @@ void PointCloudOdometry::PublishPoints(const PointCloud::Ptr& points,
                                        const ros::Publisher& pub) {
   // Check for subscribers before doing any work.
   if (pub.getNumSubscribers() > 0) {
-    pub.publish(*points);
+    PointCloud out;
+    out = *points;
+    out.header.frame_id = odometry_frame_id_;
+    pub.publish(out);
   }
 }
 
@@ -232,7 +235,7 @@ void PointCloudOdometry::PublishPose(const gu::Transform3& pose,
   // Convert from gu::Transform3 to ROS's PoseStamped type and publish.
   geometry_msgs::PoseStamped ros_pose;
   ros_pose.pose = gr::ToRosPose(pose);
-  ros_pose.header.frame_id = odometry_frame_id_;
+  ros_pose.header.frame_id = fixed_frame_id_;
   ros_pose.header.stamp = stamp_;
   pub.publish(ros_pose);
 }
